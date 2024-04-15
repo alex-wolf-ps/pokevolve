@@ -1,0 +1,162 @@
+﻿@page "/"
+@using Azure
+@using Azure.AI.OpenAI
+@using System.Text
+@using System.Net
+@inject HttpClient http;
+@inject IWebHostEnvironment env
+@rendermode InteractiveServer
+@inject ISnackbar Snackbar
+
+<PageTitle>Home</PageTitle>
+
+<MudText Typo="Typo.h3" GutterBottom="true">Evolve Your Pokemon with AI</MudText>
+
+<p>1) Choose a Pokemon generation to retrieve:</p>
+
+@if (IsLoading)
+{
+    <p class="my-4">Loading Gen @PokemonGenId Pokemon...<MudProgressCircular Color="Color.Default" Size="Size.Medium" Indeterminate="true" /></p>
+} 
+else
+{
+    <MudButtonGroup Class="my-4" Color="Color.Primary" Variant="Variant.Outlined">
+        <MudButton OnClick="() => PopulatePokemonGen(1, 0, 151)">Gen 1</MudButton>
+        <MudButton OnClick="() => PopulatePokemonGen(2, 151, 100)">Gen 2</MudButton>
+        <MudButton OnClick="() => PopulatePokemonGen(3, 251, 100)">Gen 3</MudButton>
+    </MudButtonGroup>
+}
+
+<p>2) After the results load, click the <b>Evolve</b> button on each Pokemon to see an AI enhanced version!</p>
+
+@if(PokemonGeneration.Count > 0)
+{
+    <h2 class="mt-4">Pokemon Generation @PokemonGenId</h2>
+}
+
+<MudGrid Class="my-4">
+    @foreach (var poke in PokemonGeneration)
+    {
+        <MudItem xs="4">
+            <MudCard>
+                <MudCardHeader>
+                    <CardHeaderContent>
+                        <MudText Typo="Typo.h5">@poke.name.ToUpper()</MudText>
+                    </CardHeaderContent>
+                </MudCardHeader>
+                <MudCardContent>
+                    <img src="@poke.imageUrl" style="width: 100%" />
+                </MudCardContent>
+                <MudCardActions>
+                    @if (!poke.loading)
+                    {
+                        <MudButton Size="Size.Large" OnClick="() => Evolve(poke)" Variant="Variant.Text" Color="Color.Primary">Evolve</MudButton>
+                        <MudButton Size="Size.Large" OnClick="() => Save(poke)" Variant="Variant.Text" Color="Color.Primary">Save</MudButton>
+                    }
+                    else
+                    {
+                        <MudProgressCircular Color="Color.Default" Indeterminate="true" />
+                    }
+                </MudCardActions>
+            </MudCard>
+        </MudItem>
+    }
+</MudGrid>
+
+    @code {
+    // Configure OpenAI
+    public OpenAIClient aiClient;
+    string endpoint = "";
+    string key = "";
+
+    // UI variables
+    public List<PokemonDetails> PokemonGeneration = new();
+    public bool IsLoading = false;
+    public int PokemonGenId = 1;
+
+    protected async override Task OnInitializedAsync()
+    {
+        aiClient = new(new Uri(endpoint), new AzureKeyCredential(key));
+    }
+
+    async Task PopulatePokemonGen(int genId, int offset, int limit)
+    {
+        try
+        {
+            IsLoading = true;
+            PokemonGeneration = new();
+
+            // Get the pokemon names by generation using an offset
+            var pokemonSpecies = await http.GetFromJsonAsync<PokemonSpecies>($"https://pokeapi.co/api/v2/pokemon-species?offset={offset}&limit={limit}");
+
+            foreach (var species in pokemonSpecies.results)
+            {
+                var pokemonDetails = await http.GetFromJsonAsync<PokemonDetails>($"https://pokeapi.co/api/v2/pokemon/{species.name}");
+
+                // Check if local image exists already otherwise get default sprite
+                var path = Path.Combine(env.WebRootPath, "images", $"{pokemonDetails.name}.png");
+                if (File.Exists(path))
+                {
+                    pokemonDetails.imageUrl = $"\\images\\{species.name}.png";
+                }
+                else
+                {
+                    pokemonDetails.imageUrl = pokemonDetails.sprites.front_default;
+                }
+
+                PokemonGeneration.Add(pokemonDetails);
+                StateHasChanged();
+            }
+            IsLoading = false;
+        }
+        catch (Exception e)
+        {
+            Snackbar.Add(e.Message, Severity.Error);
+            IsLoading = false;
+        }
+    }
+
+    async Task Evolve(PokemonDetails pokemon)
+    {
+        try
+        {
+            pokemon.loading = true;
+            pokemon.imageUrl = await GenerateAIImage(pokemon.name);
+            pokemon.loading = false;
+        }
+        catch (Exception e)
+        {
+            pokemon.loading = false;
+            Snackbar.Add(e.Message, Severity.Error);
+        }
+    }
+
+    async Task<string> GenerateAIImage(string pokemonName)
+    {
+        // Make request to Open AI Dalle-3 model
+        Response<ImageGenerations> imageGenerations = await aiClient.GetImageGenerationsAsync(
+        new ImageGenerationOptions()
+            {
+                Style = ImageGenerationStyle.Vivid,
+                Prompt = $"Create an epic version of the Pokemon {pokemonName} in the style of Pixar animation.",
+                Size = ImageSize.Size1024x1024,
+                DeploymentName = "wolfdalle"
+            });
+
+        // Return the URLs of the generated image
+        return imageGenerations.Value.Data[0].Url.AbsoluteUri;
+    }
+
+    async Task Save(PokemonDetails pokemon)
+    {
+        // Download file
+        var path = Path.Combine(env.WebRootPath, "images", $"{pokemon.name}.png");
+        var result = await http.GetAsync(pokemon.imageUrl);
+
+        // Save locally
+        var bytes = await result.Content.ReadAsByteArrayAsync();
+        await File.WriteAllBytesAsync(path, bytes);
+
+        Snackbar.Add("Saved!", Severity.Success);
+    }
+}
